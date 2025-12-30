@@ -40,19 +40,25 @@ function decodeBase64(base64: string) {
   return bytes;
 }
 
+/**
+ * Decodes raw PCM data (16-bit signed integer) into an AudioBuffer.
+ * The Gemini TTS API returns raw bytes without headers.
+ */
 async function decodeAudioData(
   data: Uint8Array,
   ctx: AudioContext,
   sampleRate: number,
   numChannels: number,
 ): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer);
+  // Use byteOffset and length to handle cases where the Uint8Array is a view of a larger buffer
+  const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
   const frameCount = dataInt16.length / numChannels;
   const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
 
   for (let channel = 0; channel < numChannels; channel++) {
     const channelData = buffer.getChannelData(channel);
     for (let i = 0; i < frameCount; i++) {
+      // Normalize 16-bit PCM to [-1.0, 1.0]
       channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
     }
   }
@@ -138,7 +144,7 @@ const UI_STRINGS = {
   listenAndSpell: {
     en: 'Listen and spell',
     he: 'הקשב ואיית',
-    ar: 'استמע וتهجئة',
+    ar: 'استמע וتهגئة',
     fr: 'Écoutez et épelez',
     es: 'Escucha y deletrea'
   },
@@ -210,7 +216,7 @@ const UI_STRINGS = {
     he: 'נסה שוב',
     ar: 'חאול מררה אכרא',
     fr: 'Réessayer',
-    es: 'Intentar de nuevo'
+    es: 'Intentאר de nuevo'
   },
   modifyList: {
     en: 'Modify List',
@@ -238,7 +244,7 @@ const UI_STRINGS = {
     he: 'שמור רשימה',
     ar: 'חפז אלקאאמה',
     fr: 'Sauvegarder',
-    es: 'Guardار'
+    es: 'Guardar'
   },
   export: {
     en: 'Export',
@@ -529,11 +535,12 @@ const App = () => {
       if (language === 'fr') voiceName = 'Puck';
       if (language === 'es') voiceName = 'Charon';
       
+      // EXPLICIT: use correct contents structure and Modality.AUDIO
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
         contents: [{ parts: [{ text: `Say clearly and only the word: ${word}` }] }],
         config: {
-          responseModalalities: [Modality.AUDIO],
+          responseModalities: [Modality.AUDIO], // Array with exactly one 'AUDIO' element
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: { voiceName },
@@ -542,23 +549,22 @@ const App = () => {
         },
       });
 
-      let base64Audio = null;
-      if (response.candidates?.[0]?.content?.parts) {
-        for (const part of response.candidates[0].content.parts) {
-          if (part.inlineData?.data) {
-            base64Audio = part.inlineData.data;
-            break;
-          }
-        }
-      }
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
 
-      if (!base64Audio) throw new Error("No audio data received from model");
+      if (!base64Audio) {
+        throw new Error("No audio data received from Gemini TTS API. Check modality configuration.");
+      }
 
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       }
       
       const ctx = audioContextRef.current;
+      // Ensure context is running (needed for many mobile/modern desktop browsers)
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+      
       const audioBuffer = await decodeAudioData(
         decodeBase64(base64Audio),
         ctx,
@@ -571,7 +577,13 @@ const App = () => {
       source.connect(ctx.destination);
       source.start();
     } catch (error) {
-      console.error("TTS Error:", error);
+      console.error("Gemini TTS Error:", error);
+      // Fallback: Use browser native TTS if Gemini fails
+      if ('speechSynthesis' in window) {
+        const utterance = new SpeechSynthesisUtterance(word);
+        utterance.lang = language === 'he' ? 'he-IL' : language === 'ar' ? 'ar-SA' : 'en-US';
+        window.speechSynthesis.speak(utterance);
+      }
     } finally {
       setIsAudioLoading(false);
     }
@@ -652,7 +664,6 @@ const App = () => {
   const renderFeedbackDiff = (correct: string, typed: string) => {
     const cArr = correct.toLowerCase().split('');
     const tArr = typed.toLowerCase().split('');
-    const maxLength = Math.max(cArr.length, tArr.length);
 
     return (
       <div className="flex flex-wrap justify-center gap-1 font-black text-4xl sm:text-5xl tracking-widest transition-all">
@@ -1075,7 +1086,7 @@ const App = () => {
          <div className="bg-white/50 border border-slate-200 rounded-[2.5rem] p-8 flex flex-col md:flex-row items-center justify-between gap-4 text-slate-400 font-black text-[10px] uppercase tracking-[0.2em]">
            <p>© {new Date().getFullYear()} DictateMaster AI • Senior Edition</p>
            <div className="flex gap-8">
-             <span>v2.7 Real-time Check</span>
+             <span>v2.8.5 Optimized Audio</span>
              <span>Offline Persistence</span>
            </div>
          </div>
