@@ -1,31 +1,36 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 import { 
   Volume2, 
-  CheckCircle2, 
-  XCircle, 
   ArrowRight, 
   RotateCcw, 
-  Settings, 
   BookOpen, 
   Trophy, 
   Loader2, 
-  Timer, 
-  Info, 
-  Save, 
   Trash2, 
-  Zap, 
-  Clock, 
-  TrendingDown, 
-  ChevronRight, 
-  Sparkles, 
-  Download, 
   Upload, 
-  FolderOpen, 
-  Plus,
-  Copy,
-  GripVertical
+  Sun, 
+  Moon, 
+  Type as TypeIcon, 
+  Mail, 
+  Volume1, 
+  SkipForward, 
+  RefreshCcw,
+  Search,
+  Save,
+  Clock,
+  FileText,
+  Download,
+  Zap,
+  LayoutList,
+  Mic2,
+  History as HistoryIcon,
+  PlayCircle,
+  PlusCircle,
+  ChevronRight,
+  Target,
+  Pause
 } from 'lucide-react';
 import { GoogleGenAI, Modality } from "@google/genai";
 
@@ -40,17 +45,12 @@ function decodeBase64(base64: string) {
   return bytes;
 }
 
-/**
- * Decodes raw PCM data (16-bit signed integer) into an AudioBuffer.
- * The Gemini TTS API returns raw bytes without headers.
- */
 async function decodeAudioData(
   data: Uint8Array,
   ctx: AudioContext,
   sampleRate: number,
   numChannels: number,
 ): Promise<AudioBuffer> {
-  // Use byteOffset and length to handle cases where the Uint8Array is a view of a larger buffer
   const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
   const frameCount = dataInt16.length / numChannels;
   const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
@@ -58,7 +58,6 @@ async function decodeAudioData(
   for (let channel = 0; channel < numChannels; channel++) {
     const channelData = buffer.getChannelData(channel);
     for (let i = 0; i < frameCount; i++) {
-      // Normalize 16-bit PCM to [-1.0, 1.0]
       channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
     }
   }
@@ -66,15 +65,17 @@ async function decodeAudioData(
 }
 
 // --- Types ---
-
-type Language = 'en' | 'he' | 'ar' | 'fr' | 'es';
+type Language = 'en' | 'he' | 'ar' | 'fr' | 'es' | 'zh' | 'hi' | 'de';
+type FontSize = 'base' | 'lg' | 'xl';
+type PracticeMode = 'classic' | 'timed';
+type SetupTab = 'new' | 'library' | 'history';
 
 interface WordStatus {
   word: string;
   meaning?: string;
   userValue: string;
   isCorrect: boolean | null;
-  timeTaken: number; // in seconds
+  timeTaken: number;
 }
 
 interface SavedList {
@@ -84,1012 +85,592 @@ interface SavedList {
   timestamp: number;
 }
 
-const UI_STRINGS = {
+interface MissedWord {
+  word: string;
+  meaning: string;
+}
+
+interface PracticeHistory {
+  id: string;
+  timestamp: number;
+  mode: PracticeMode;
+  score: number;
+  total: number;
+  time: number;
+  missedWords: MissedWord[];
+  fullListRaw: string;
+}
+
+interface AutosaveState {
+  step: 'practice';
+  mode: PracticeMode;
+  words: WordStatus[];
+  currentIndex: number;
+  elapsedTime: number;
+  timedScore: number;
+  timeLeft: number;
+  language: Language;
+}
+
+const UI_STRINGS: Record<string, Record<Language, string>> = {
   setupTitle: {
-    en: 'Setup Your Dictation',
-    he: 'הגדר את ההכתבה שלך',
-    ar: 'إعداد الإמلاء الخاص بك',
-    fr: 'Configurez votre dictée',
-    es: 'Configura tu dictado'
+    en: 'Setup Your Dictation', he: 'הגדר את ההכתבה שלך', ar: 'إعداد الإملاء', fr: 'Configurez votre dictée', es: 'Configura tu dictado', zh: '设置听写', hi: 'अपनी श्रुतलेख सेट करें', de: 'Diktat einrichten'
   },
   setupDesc: {
-    en: 'List your words. Use the format "word:meaning" to see translations during practice.',
-    he: 'רשום את המילים שלך. השתמש בפורמט "מילה:פירוש" כדי לראות תרגומים בזמן התרגול.',
-    ar: 'ضع قائمة بكلماتك. استخدم تنسيق "الكلمة:المعنى" لرؤية الترجمות أثناء המمارسة.',
-    fr: 'Listez vos mots. Utilisez le format "mot:définition" pour voir les traductions pendant l\'entraînement.',
-    es: 'Enumera tus palabras. Usa el formato "palabra:significado" para ver traducciones durante la práctica.'
+    en: 'List words. Format "word:meaning" or "v1:v2:v3:meaning".',
+    he: 'רשום מילים בפורמט "מילה:פירוש" או "v1:v2:v3:פירוש".',
+    ar: 'ضع قائمة بالكلمات. التنسيق "الكلمة:المعنى" או "v1:v2:v3:المعنى".',
+    fr: 'Listez vos mots. Format "mot:définition" ou "v1:v2:v3:définition".',
+    es: 'Enumera palabras. Formato "palabra:significado" o "v1:v2:v3:significado".',
+    zh: '列出单词。格式为“单词:意思”或“v1:v2:v3:意思”。',
+    hi: 'शब्द लिखें। प्रारूप "शब्द:अर्थ" या "वही:अर्थ"।',
+    de: 'Wörter auflisten. Format "Wort:Bedeutung" oder "v1:v2:v3:Bedeutung".'
   },
-  wordListLabel: {
-    en: 'Word List',
-    he: 'רשימת מילים',
-    ar: 'קائمة הכלימאת',
-    fr: 'Liste de mots',
-    es: 'Lista de palabras'
-  },
-  autoFillBtn: {
-    en: 'Auto-fill Meanings',
-    he: 'מלא פירושים אוטומטית',
-    ar: 'ملء المعاني تلقائيًا',
-    fr: 'Remplir les définitions',
-    es: 'Rellenar significados'
-  },
-  startBtn: {
-    en: 'Start Practicing',
-    he: 'התחל לתרגל',
-    ar: 'ابدأ التمرين',
-    fr: "Commencer l'entraînement",
-    es: 'Empezar a practicar'
-  },
-  offlineMsg: {
-    en: 'Offline Enabled: Your list is saved locally.',
-    he: 'זמין לא מקוון: הרשימה שלך נשמרת מקומית.',
-    ar: 'تم تمكين وضع عدم الاتصال: يتم حفظ قائمتك محليًا.',
-    fr: 'Mode hors ligne activé : Votre liste est sauvegardée localement.',
-    es: 'Modo sin conexión activado: Tu lista se guarda localmente.'
-  },
-  progress: {
-    en: 'Progress',
-    he: 'התקדמות',
-    ar: 'التقدم',
-    fr: 'Progression',
-    es: 'Progreso'
-  },
-  meaning: {
-    en: 'Meaning',
-    he: 'פירוש המילה',
-    ar: 'معنى הכלמה',
-    fr: 'Signification',
-    es: 'Significado'
-  },
-  listenAndSpell: {
-    en: 'Listen and spell',
-    he: 'הקשב ואיית',
-    ar: 'استמע וتهגئة',
-    fr: 'Écoutez et épelez',
-    es: 'Escucha y deletrea'
-  },
-  typeHere: {
-    en: 'Type spelling...',
-    he: 'הקלד את המילה...',
-    ar: 'اكتب الإמلاء...',
-    fr: 'Écrivez ici...',
-    es: 'Escribe aquí...'
-  },
-  submit: {
-    en: 'Submit',
-    he: 'שלח',
-    ar: 'إרסאל',
-    fr: 'Valider',
-    es: 'Enviar'
-  },
-  next: {
-    en: 'Next',
-    he: 'הבא',
-    ar: 'التالي',
-    fr: 'Suivant',
-    es: 'Siguiente'
-  },
-  incorrect: {
-    en: 'Incorrect. The correct spelling is:',
-    he: 'לא נכון. האיות הנכון הוא:',
-    ar: 'غير صحيح. الإמلاء الصحيח هو:',
-    fr: "Incorrect. L'orthographe correcte est :",
-    es: 'Incorrecto. El deletreo correcto es:'
-  },
-  cancel: {
-    en: 'Cancel Practice',
-    he: 'בטל תרגול',
-    ar: 'إלגاء המمارسة',
-    fr: "Annuler l'entraînement",
-    es: 'Cancelar práctica'
-  },
-  finalScore: {
-    en: 'Final Score',
-    he: 'ציון סופי',
-    ar: 'النتيجة النهائية',
-    fr: 'Score final',
-    es: 'Puntuación final'
-  },
-  accuracy: {
-    en: 'Accuracy',
-    he: 'דיוק',
-    ar: 'دقة',
-    fr: 'Précision',
-    es: 'Precisión'
-  },
-  speedBonus: {
-    en: 'Speed Bonus',
-    he: 'בונוס מהירות',
-    ar: 'מכאפאאת אלסרעה',
-    fr: 'Bonus de vitesse',
-    es: 'Bonificación de velocidad'
-  },
-  timePenalties: {
-    en: 'Time Penalties',
-    he: 'קנסות זמן',
-    ar: 'עקובאת אלווקת',
-    fr: 'Pénalités de temps',
-    es: 'Penalizaciones de tiempo'
-  },
-  tryAgain: {
-    en: 'Try Again',
-    he: 'נסה שוב',
-    ar: 'חאול מררה אכרא',
-    fr: 'Réessayer',
-    es: 'Intentאר de nuevo'
-  },
-  modifyList: {
-    en: 'Modify List',
-    he: 'ערוך רשימה',
-    ar: 'תעדיל אלקאאמה',
-    fr: 'Modifier la liste',
-    es: 'Modificar lista'
-  },
-  alertEnterWords: {
-    en: 'Please enter some words in the list.',
-    he: 'אנא הזן מספר מילים ברשימה.',
-    ar: 'ירגא אדכאל בעץ אלקלמאת.',
-    fr: 'Veuillez saisir des mots dans la liste.',
-    es: 'Por favor, introduce algunas palabras en la lista.'
-  },
-  savedLists: {
-    en: 'Library',
-    he: 'ספרייה',
-    ar: 'אלמכתבה',
-    fr: 'Bibliothèque',
-    es: 'Biblioteca'
-  },
-  saveCurrent: {
-    en: 'Save List',
-    he: 'שמור רשימה',
-    ar: 'חפז אלקאאמה',
-    fr: 'Sauvegarder',
-    es: 'Guardar'
-  },
-  export: {
-    en: 'Export',
-    he: 'ייצא',
-    ar: 'תצדיר',
-    fr: 'Exporter',
-    es: 'Exportar'
-  },
-  import: {
-    en: 'Import',
-    he: 'ייבא',
-    ar: 'אסתיראד',
-    fr: 'Importer',
-    es: 'Importar'
-  },
-  copy: {
-    en: 'Copy to Clipboard',
-    he: 'העתק ללוח',
-    ar: 'נסח',
-    fr: 'Copier',
-    es: 'Copiar'
-  },
-  reorderTitle: {
-    en: 'Reorder List',
-    he: 'סידור מחדש',
-    ar: 'אעאדה תרתיב',
-    fr: 'Réorganiser',
-    es: 'Reordenar'
-  },
-  typed: {
-    en: 'You typed',
-    he: 'הקלדת',
-    ar: 'כאנת אגאבתך',
-    fr: 'Vous avez tapé',
-    es: 'Escribiste'
-  }
+  new: { en: 'New', he: 'חדש', ar: 'جديد', fr: 'Nouveau', es: 'Nuevo', zh: '新建', hi: 'नया', de: 'Neu' },
+  library: { en: 'Library', he: 'ספרייה', ar: 'المكتبة', fr: 'Bibliothèque', es: 'Biblioteca', zh: '库', hi: 'पुस्तकालय', de: 'Bibliothek' },
+  history: { en: 'History', he: 'היסטוריה', ar: 'التاريخ', fr: 'Historique', es: 'Historial', zh: '历史', hi: 'इतिहास', de: 'Verlauf' },
+  startBtn: { en: 'Start Practicing', he: 'התחל לתרגל', ar: 'ابدأ التمرين', fr: "Commencer", es: 'Empezar', zh: '开始练习', hi: 'अभ्यास शुरू करें', de: 'Übung starten' },
+  listenNative: { en: 'Listen (Offline)', he: 'הקשב (לא מקוון)', ar: 'استמע (بدون اتصال)', fr: 'Écouter (Hors ligne)', es: 'Escuchar (Offline)', zh: '收听 (离线)', hi: 'सुनें (ऑफलाइन)', de: 'Hören (Offline)' },
+  typeHere: { en: 'Type here...', he: 'הקלד כאן...', ar: 'اكتب هنا...', fr: 'Écrivez ici...', es: 'Escribe aquí...', zh: '在这里输入...', hi: 'यहाँ टाइप करें...', de: 'Hier tippen...' },
+  submit: { en: 'Submit', he: 'שלח', ar: 'إرسאל', fr: 'Valider', es: 'Enviar', zh: '提交', hi: 'भेजें', de: 'Absenden' },
+  next: { en: 'Next', he: 'הבא', ar: 'التالي', fr: 'Suivant', es: 'Siguiente', zh: '下一步', hi: 'अगלה', de: 'Weiter' },
+  tryAgain: { en: 'Try Again', he: 'נסה שוב', ar: 'حاول مرة أخرى', fr: 'Réessayer', es: 'Intentar de nuevo', zh: '再试一次', hi: 'फिर से कोशिश करें', de: 'Nochmal versuchen' },
+  retry: { en: 'Retry', he: 'נסה שוב', ar: 'إعادة המחاولة', fr: 'Réessayer', es: 'Reintentar', zh: '重试', hi: 'पुनः प्रयास करें', de: 'Wiederholen' },
+  skip: { en: 'Skip', he: 'דלג', ar: 'תخطى', fr: 'Sauter', es: 'Saltar', zh: '跳过', hi: 'छוड़ें', de: 'Überspringen' },
+  saveList: { en: 'Save List', he: 'שמור רשימה', ar: 'חفظ القائمة', fr: 'Enregistrer', es: 'Guardar lista', zh: '保存列表', hi: 'सूची सहेजें', de: 'Liste speichern' },
+  classicMode: { en: 'Classic Mode', he: 'מצב קלאסי', ar: 'الوضع الكلاسيكي', fr: 'Mode Classique', es: 'Modo Clásico', zh: '经典模式', hi: 'क्लासिक मोड', de: 'Klassischer Modus' },
+  timedMode: { en: 'Timed Challenge', he: 'אתגר בזמן', ar: 'תحدي الوقت', fr: 'Défi Chrono', es: 'Desafío de Tiempo', zh: '计时挑战', hi: 'समयबद्ध चुनौती', de: 'Zeit-Challenge' }
 };
 
 const App = () => {
   const [step, setStep] = useState<'setup' | 'practice' | 'summary'>('setup');
+  const [activeTab, setActiveTab] = useState<SetupTab>('new');
+  const [practiceMode, setPracticeMode] = useState<PracticeMode>('classic');
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('dm_theme') as any) || 'dark');
+  const [fontSize, setFontSize] = useState<FontSize>(() => (localStorage.getItem('dm_font') as FontSize) || 'base');
   const [language, setLanguage] = useState<Language>(() => (localStorage.getItem('dm_lang') as Language) || 'en');
   const [wordListRaw, setWordListRaw] = useState(() => localStorage.getItem('dm_words') || '');
   const [words, setWords] = useState<WordStatus[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [userInput, setUserInput] = useState('');
   const [isAudioLoading, setIsAudioLoading] = useState(false);
-  const [isAutoFilling, setIsAutoFilling] = useState(false);
   const [showFeedback, setShowFeedback] = useState<boolean | null>(null);
-  const [copyFeedback, setCopyFeedback] = useState(false);
-  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
+  const [newListName, setNewListName] = useState('');
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>(() => localStorage.getItem('dm_voice_uri') || '');
   
+  // State for pausing the practice session
+  const [isPaused, setIsPaused] = useState(false);
+
   const [library, setLibrary] = useState<SavedList[]>(() => {
     const stored = localStorage.getItem('dm_library');
     return stored ? JSON.parse(stored) : [];
   });
+
+  const [history, setHistory] = useState<PracticeHistory[]>(() => {
+    const stored = localStorage.getItem('dm_history');
+    return stored ? JSON.parse(stored) : [];
+  });
+
+  const [autosave, setAutosave] = useState<AutosaveState | null>(() => {
+    const stored = localStorage.getItem('dm_autosave');
+    return stored ? JSON.parse(stored) : null;
+  });
   
-  // Timer State
   const [startTime, setStartTime] = useState<number | null>(null);
   const [wordStartTime, setWordStartTime] = useState<number | null>(null);
-  const [totalSessionTime, setTotalSessionTime] = useState(0);
   const [elapsedTime, setElapsedTime] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(60);
+  const [timedScore, setTimedScore] = useState(0);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const timerIntervalRef = useRef<number | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const touchStartRef = useRef<number | null>(null);
 
   const isRTL = language === 'he' || language === 'ar';
 
   useEffect(() => {
-    localStorage.setItem('dm_lang', language);
-  }, [language]);
+    localStorage.setItem('dm_theme', theme);
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+  }, [theme]);
+
+  useEffect(() => { localStorage.setItem('dm_lang', language); }, [language]);
+  useEffect(() => { localStorage.setItem('dm_words', wordListRaw); }, [wordListRaw]);
+  useEffect(() => { localStorage.setItem('dm_font', fontSize); }, [fontSize]);
+  useEffect(() => { localStorage.setItem('dm_library', JSON.stringify(library)); }, [library]);
+  useEffect(() => { localStorage.setItem('dm_history', JSON.stringify(history)); }, [history]);
+  useEffect(() => { localStorage.setItem('dm_voice_uri', selectedVoiceURI); }, [selectedVoiceURI]);
 
   useEffect(() => {
-    localStorage.setItem('dm_words', wordListRaw);
-  }, [wordListRaw]);
+    if (step === 'practice') {
+      const state: AutosaveState = {
+        step, mode: practiceMode, words, currentIndex, elapsedTime, timedScore, timeLeft, language
+      };
+      localStorage.setItem('dm_autosave', JSON.stringify(state));
+    } else if (step === 'summary') {
+      localStorage.removeItem('dm_autosave');
+    }
+  }, [step, words, currentIndex, elapsedTime, timedScore, timeLeft, practiceMode, language]);
 
   useEffect(() => {
-    localStorage.setItem('dm_library', JSON.stringify(library));
-  }, [library]);
+    const loadVoices = () => {
+      setVoices(window.speechSynthesis.getVoices());
+    };
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+    return () => { window.speechSynthesis.onvoiceschanged = null; };
+  }, []);
 
   useEffect(() => {
-    if (step === 'practice' && startTime !== null) {
+    // Only update timer if not paused
+    if (step === 'practice' && startTime !== null && !isPaused) {
       timerIntervalRef.current = window.setInterval(() => {
-        setElapsedTime(Math.floor((Date.now() - startTime) / 1000));
+        if (practiceMode === 'classic') {
+          setElapsedTime(Math.floor((Date.now() - startTime) / 1000));
+        } else {
+          setTimeLeft(prev => {
+            if (prev <= 1) {
+              setStep('summary');
+              return 0;
+            }
+            return prev - 1;
+          });
+          setElapsedTime(prev => prev + 1);
+        }
       }, 1000);
     } else {
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
     }
     return () => { if (timerIntervalRef.current) clearInterval(timerIntervalRef.current); };
-  }, [step, startTime]);
+  }, [step, startTime, practiceMode, isPaused]);
 
-  const handleExport = () => {
-    const blob = new Blob([wordListRaw], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `dictation_list_${new Date().toISOString().split('T')[0]}.txt`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const content = event.target?.result as string;
-      if (content) setWordListRaw(content);
-    };
-    reader.readAsText(file);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(wordListRaw);
-      setCopyFeedback(true);
-      setTimeout(() => setCopyFeedback(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy text: ', err);
-    }
-  };
-
-  const handleSaveList = () => {
-    if (!wordListRaw.trim()) return;
-    const name = prompt(language === 'he' ? 'שם לרשימה:' : 'List name:');
-    if (!name) return;
-    const newList: SavedList = {
-      id: Math.random().toString(36).substr(2, 9),
-      name,
-      content: wordListRaw,
-      timestamp: Date.now()
-    };
-    setLibrary([...library, newList]);
-  };
-
-  const handleLoadList = (list: SavedList) => {
-    setWordListRaw(list.content);
-  };
-
-  const handleDeleteList = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    setLibrary(library.filter(l => l.id !== id));
-  };
-
-  const autoFillMeanings = async () => {
-    if (!wordListRaw.trim() || isAutoFilling) return;
-    setIsAutoFilling(true);
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Translate the following list of words into Hebrew.
-        Input language: ${language === 'he' ? 'English' : language}.
-        Output format: One word per line, in the format "original_word:hebrew_translation".
-        If a word already has a meaning after a colon, keep it as is.
-        Words:
-        ${wordListRaw}`,
-      });
-      
-      const text = response.text;
-      if (text) {
-        setWordListRaw(text.trim());
+  const handleNativeTTS = (text: string, forceLang?: string) => {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      const langMap: Record<Language, string> = {
+        en: 'en-US', he: 'he-IL', ar: 'ar-SA', fr: 'fr-FR', es: 'es-ES', zh: 'zh-CN', hi: 'hi-IN', de: 'de-DE'
+      };
+      utterance.lang = forceLang || langMap[language];
+      if (selectedVoiceURI) {
+        const voice = voices.find(v => v.voiceURI === selectedVoiceURI);
+        if (voice) utterance.voice = voice;
       }
-    } catch (error) {
-      console.error("Auto-fill error:", error);
-    } finally {
-      setIsAutoFilling(false);
+      window.speechSynthesis.speak(utterance);
     }
   };
 
-  const parseWordList = (raw: string) => {
-    return raw
-      .split(/[\n\r]+/)
-      .map(line => line.trim())
-      .filter(line => line.length > 0);
-  };
-
-  const startPractice = () => {
-    const lines = parseWordList(wordListRaw);
-    const parsedWords = lines.map(line => {
-        const parts = line.split(/[:\-]/);
-        if (parts.length < 2) return { word: line.trim(), userValue: '', isCorrect: null, timeTaken: 0 };
-        
-        let wordCandidate = parts[0].trim();
-        let meaningCandidate = parts[1].trim();
-
-        const hasLatin = (s: string) => /[a-zA-Z]/.test(s);
-        if (hasLatin(meaningCandidate) && !hasLatin(wordCandidate)) {
-           [wordCandidate, meaningCandidate] = [meaningCandidate, wordCandidate];
-        }
-
-        return { 
-          word: wordCandidate, 
-          meaning: meaningCandidate, 
-          userValue: '', 
-          isCorrect: null, 
-          timeTaken: 0 
-        };
-      });
-
-    if (parsedWords.length === 0) {
-      alert(UI_STRINGS.alertEnterWords[language]);
-      return;
-    }
-
-    setWords(parsedWords);
-    setCurrentIndex(0);
-    setStep('practice');
-    setUserInput('');
-    setShowFeedback(null);
-    const now = Date.now();
-    setStartTime(now);
-    setWordStartTime(now);
-    setElapsedTime(0);
-  };
-
-  // Reorder functionality
-  const handleDragStart = (index: number) => {
-    setDraggedIndex(index);
-  };
-
-  const handleDragOver = (e: React.DragEvent, index: number) => {
-    e.preventDefault();
-    if (draggedIndex === null || draggedIndex === index) return;
-
-    const lines = parseWordList(wordListRaw);
-    const updatedLines = [...lines];
-    const [draggedItem] = updatedLines.splice(draggedIndex, 1);
-    updatedLines.splice(index, 0, draggedItem);
-    
-    setWordListRaw(updatedLines.join('\n'));
-    setDraggedIndex(index);
-  };
-
-  const handleDragEnd = () => {
-    setDraggedIndex(null);
-  };
-
-  // Synthesized feedback sounds
-  const playFeedbackSound = (isCorrect: boolean) => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-    }
-    const ctx = audioContextRef.current;
-    if (ctx.state === 'suspended') ctx.resume();
-    
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    const now = ctx.currentTime;
-
-    if (isCorrect) {
-      // Success chime
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(880, now); // A5
-      osc.frequency.exponentialRampToValueAtTime(1320, now + 0.1); // E6
-      gain.gain.setValueAtTime(0.08, now);
-      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
-      osc.start(now);
-      osc.stop(now + 0.3);
-    } else {
-      // Error buzz
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(120, now); // B2ish
-      osc.frequency.linearRampToValueAtTime(60, now + 0.3); // Drop pitch
-      gain.gain.setValueAtTime(0.08, now);
-      gain.gain.linearRampToValueAtTime(0.01, now + 0.3);
-      osc.start(now);
-      osc.stop(now + 0.3);
-    }
-  };
-
-  const playWord = async (word: string) => {
+  const playGeminiTTS = async (word: string) => {
     if (isAudioLoading) return;
     setIsAudioLoading(true);
-
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      let voiceName = 'Zephyr';
-      if (language === 'en') voiceName = 'Kore';
-      if (language === 'fr') voiceName = 'Puck';
-      if (language === 'es') voiceName = 'Charon';
-      
-      // EXPLICIT: use correct contents structure and Modality.AUDIO
+      const voiceMap: Partial<Record<Language, string>> = { en: 'Kore', fr: 'Puck', es: 'Charon', de: 'Zephyr' };
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
-        contents: [{ parts: [{ text: `Say clearly and only the word: ${word}` }] }],
+        contents: [{ parts: [{ text: word }] }],
         config: {
-          responseModalities: [Modality.AUDIO], // Array with exactly one 'AUDIO' element
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName },
-            },
-          },
+          responseModalities: [Modality.AUDIO],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceMap[language] || 'Zephyr' } } },
         },
       });
-
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-
-      if (!base64Audio) {
-        throw new Error("No audio data received from Gemini TTS API. Check modality configuration.");
-      }
-
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      }
-      
+      if (!base64Audio) throw new Error("No audio");
+      if (!audioContextRef.current) audioContextRef.current = new AudioContext({ sampleRate: 24000 });
       const ctx = audioContextRef.current;
-      // Ensure context is running (needed for many mobile/modern desktop browsers)
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-      }
-      
-      const audioBuffer = await decodeAudioData(
-        decodeBase64(base64Audio),
-        ctx,
-        24000,
-        1,
-      );
-
+      if (ctx.state === 'suspended') await ctx.resume();
+      const buffer = await decodeAudioData(decodeBase64(base64Audio), ctx, 24000, 1);
       const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
+      source.buffer = buffer;
       source.connect(ctx.destination);
       source.start();
     } catch (error) {
-      console.error("Gemini TTS Error:", error);
-      // Fallback: Use browser native TTS if Gemini fails
-      if ('speechSynthesis' in window) {
-        const utterance = new SpeechSynthesisUtterance(word);
-        utterance.lang = language === 'he' ? 'he-IL' : language === 'ar' ? 'ar-SA' : 'en-US';
-        window.speechSynthesis.speak(utterance);
-      }
+      handleNativeTTS(word);
     } finally {
       setIsAudioLoading(false);
     }
   };
 
-  const checkWord = () => {
-    const now = Date.now();
-    const timeForThisWord = Math.floor((now - (wordStartTime || now)) / 1000);
-    
-    const currentWord = words[currentIndex].word.toLowerCase().trim();
-    const userTyped = userInput.toLowerCase().trim();
-    const isCorrect = currentWord === userTyped;
+  const parseWords = (raw: string): WordStatus[] => {
+    return raw.split('\n').map(line => {
+      const parts = line.split(':');
+      if (parts.length < 2) return null;
+      const forms = parts.slice(0, -1).map(p => p.trim());
+      const meaning = parts[parts.length - 1].trim();
+      return { word: forms.join(' '), meaning, userValue: '', isCorrect: null, timeTaken: 0 };
+    }).filter(Boolean) as WordStatus[];
+  };
 
-    const newWords = [...words];
-    newWords[currentIndex] = { 
-      ...newWords[currentIndex], 
-      userValue: userInput, 
-      isCorrect,
-      timeTaken: timeForThisWord 
+  const startPractice = (customWords?: WordStatus[]) => {
+    const listToUse = customWords || parseWords(wordListRaw);
+    if (listToUse.length === 0) return alert("Please add words first!");
+    
+    if (practiceMode === 'timed') {
+      listToUse.sort(() => Math.random() - 0.5);
+      setTimeLeft(60);
+      setTimedScore(0);
+    }
+    setWords(listToUse);
+    setStep('practice');
+    setCurrentIndex(0);
+    setIsPaused(false);
+    setStartTime(Date.now());
+    setWordStartTime(Date.now());
+  };
+
+  const resumePractice = () => {
+    if (!autosave) return;
+    setWords(autosave.words);
+    setCurrentIndex(autosave.currentIndex);
+    setPracticeMode(autosave.mode);
+    setElapsedTime(autosave.elapsedTime);
+    setTimedScore(autosave.timedScore);
+    setTimeLeft(autosave.timeLeft);
+    setLanguage(autosave.language);
+    setStep('practice');
+    setIsPaused(false);
+    setStartTime(Date.now());
+    setWordStartTime(Date.now());
+  };
+
+  const finalizeSession = () => {
+    const missed = words.filter(w => w.isCorrect === false).map(w => ({ word: w.word, meaning: w.meaning || '' }));
+    const record: PracticeHistory = {
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      mode: practiceMode,
+      score: practiceMode === 'classic' ? words.filter(w => w.isCorrect).length : timedScore,
+      total: words.length,
+      time: elapsedTime,
+      missedWords: missed,
+      fullListRaw: wordListRaw
     };
-    setWords(newWords);
-    setShowFeedback(isCorrect);
-    
-    // Play immediate feedback sound
-    playFeedbackSound(isCorrect);
+    setHistory(prev => [record, ...prev].slice(0, 50));
+    setStep('summary');
+  };
 
+  const checkWord = () => {
+    if (isPaused) return;
+    if (showFeedback !== null) {
+      nextStep();
+      return;
+    }
+    const isCorrect = userInput.toLowerCase().trim() === words[currentIndex].word.toLowerCase().trim();
+    const updated = [...words];
+    updated[currentIndex] = { ...words[currentIndex], isCorrect, timeTaken: Math.floor((Date.now() - (wordStartTime || 0)) / 1000) };
+    setWords(updated);
+    setShowFeedback(isCorrect);
     if (isCorrect) {
-      setTimeout(() => {
-        nextStep(now);
-      }, 1000);
+      if (practiceMode === 'timed') setTimedScore(s => s + 1);
+      setTimeout(() => nextStep(), practiceMode === 'timed' ? 400 : 1200);
     }
   };
 
-  const nextStep = (timestamp?: number) => {
-    const now = timestamp || Date.now();
+  const nextStep = () => {
     setShowFeedback(null);
     setUserInput('');
-    if (currentIndex < words.length - 1) {
-      setCurrentIndex(prev => prev + 1);
-      setWordStartTime(now);
+    let nextIdx = currentIndex + 1;
+    if (practiceMode === 'timed' && nextIdx >= words.length) {
+      nextIdx = 0;
+      setWords(prev => [...prev].sort(() => Math.random() - 0.5));
+    }
+    if (nextIdx < words.length) {
+      setCurrentIndex(nextIdx);
+      setWordStartTime(Date.now());
+      setTimeout(() => inputRef.current?.focus(), 100);
     } else {
-      const finalTotalTime = Math.floor((now - (startTime || 0)) / 1000);
-      setTotalSessionTime(finalTotalTime);
-      setStep('summary');
+      finalizeSession();
     }
   };
 
-  const reset = () => {
-    setStep('setup');
-    setWords([]);
-    setCurrentIndex(0);
-    setUserInput('');
-    setStartTime(null);
-    setWordStartTime(null);
+  // Added skipWord function to handle skipping the current word
+  const skipWord = () => {
+    if (isPaused) return;
+    const updated = [...words];
+    updated[currentIndex] = { 
+      ...words[currentIndex], 
+      isCorrect: false, 
+      timeTaken: Math.floor((Date.now() - (wordStartTime || 0)) / 1000) 
+    };
+    setWords(updated);
+    nextStep();
   };
 
-  const getScoreBreakdown = () => {
-    let accuracyPoints = 0;
-    let speedBonus = 0;
-    let timePenalty = 0;
+  const filteredVoices = useMemo(() => {
+    const prefixMap: Record<string, string> = {
+      en: 'en', he: 'he', ar: 'ar', fr: 'fr', es: 'es', zh: 'zh', hi: 'hi', de: 'de'
+    };
+    return voices.filter(v => v.lang.startsWith(prefixMap[language]));
+  }, [voices, language]);
 
-    words.forEach(w => {
-      if (w.isCorrect) {
-        accuracyPoints += 100;
-        if (w.timeTaken < 4) speedBonus += 50;
-        else if (w.timeTaken < 8) speedBonus += 30;
-        else if (w.timeTaken < 15) speedBonus += 10;
-        if (w.timeTaken > 30) timePenalty += 20;
-      } else {
-        if (w.timeTaken > 40) timePenalty += 30;
-      }
-    });
-
-    const finalScore = Math.max(0, accuracyPoints + speedBonus - timePenalty);
-    return { accuracyPoints, speedBonus, timePenalty, finalScore };
-  };
-
-  const renderFeedbackDiff = (correct: string, typed: string) => {
-    const cArr = correct.toLowerCase().split('');
-    const tArr = typed.toLowerCase().split('');
-
-    return (
-      <div className="flex flex-wrap justify-center gap-1 font-black text-4xl sm:text-5xl tracking-widest transition-all">
-        {tArr.map((char, i) => {
-          const isWrong = char !== cArr[i];
-          return (
-            <span 
-              key={i} 
-              className={`rounded px-1 inline-block transition-colors ${
-                isWrong ? 'text-red-500 bg-red-50 ring-1 ring-red-100' : 'text-slate-300'
-              }`}
-            >
-              {char}
-            </span>
-          );
-        })}
-        {cArr.length > tArr.length && (
-          <span className="text-red-200 animate-pulse bg-red-50/50 px-1 rounded">
-            {'_'.repeat(cArr.length - tArr.length)}
-          </span>
-        )}
-      </div>
-    );
-  };
-
-  const renderRealTimeSpellCheck = (userInput: string, targetWord: string) => {
-    const uArr = userInput.split('');
-    const tArr = targetWord.toLowerCase().split('');
-
-    return (
-      <div className="flex justify-center gap-1 font-black text-5xl tracking-widest pointer-events-none transition-all">
-        {uArr.map((char, i) => {
-          const targetChar = tArr[i];
-          const isError = targetChar !== undefined && char.toLowerCase() !== targetChar;
-          const isExtra = targetChar === undefined;
-          
-          return (
-            <span 
-              key={i} 
-              className={`transition-colors duration-200 ${
-                isError || isExtra ? 'text-red-500 underline decoration-wavy decoration-red-400' : 'text-slate-800'
-              }`}
-            >
-              {char}
-            </span>
-          );
-        })}
-      </div>
-    );
-  };
-
-  const scoreInfo = getScoreBreakdown();
-  const progress = words.length > 0 ? ((currentIndex + (showFeedback !== null ? 1 : 0)) / words.length) * 100 : 0;
-  const wordLines = parseWordList(wordListRaw);
+  const filteredLibrary = library.filter(i => i.name.toLowerCase().includes(searchTerm.toLowerCase()) || i.content.toLowerCase().includes(searchTerm.toLowerCase()));
+  const fontSizeClass = fontSize === 'xl' ? 'text-3xl' : fontSize === 'lg' ? 'text-xl' : 'text-base';
 
   return (
-    <div className={`min-h-screen bg-slate-50 text-slate-900 font-sans transition-all duration-500 ${isRTL ? 'rtl' : 'ltr'}`} dir={isRTL ? 'rtl' : 'ltr'}>
-      <header className="bg-white/80 backdrop-blur-md border-b border-slate-200 px-6 py-4 sticky top-0 z-50">
-        <div className="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-4">
-          <div className="flex items-center gap-2 text-indigo-600">
-            <BookOpen size={28} className="animate-pulse" />
-            <h1 className="text-xl font-bold tracking-tight">DictateMaster</h1>
-          </div>
-          <div className="flex bg-slate-100 rounded-full p-1 shadow-inner overflow-x-auto max-w-full no-scrollbar">
-            {(['en', 'he', 'ar', 'fr', 'es'] as Language[]).map((l) => (
-              <button
-                key={l}
-                onClick={() => {
-                  setLanguage(l);
-                  if (step === 'practice') reset();
-                }}
-                className={`px-4 py-1.5 rounded-full text-[11px] font-black transition-all whitespace-nowrap tracking-wider ${
-                  language === l ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'
-                }`}
-              >
-                {l.toUpperCase()}
+    <div className={`min-h-screen transition-colors duration-300 font-sans selection:bg-indigo-500/30 ${theme === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'} ${isRTL ? 'rtl' : 'ltr'}`} dir={isRTL ? 'rtl' : 'ltr'}>
+      <header className={`sticky top-0 z-50 backdrop-blur-md border-b px-6 py-4 flex flex-wrap justify-between items-center gap-4 ${theme === 'dark' ? 'bg-slate-900/80 border-slate-800' : 'bg-white/80 border-slate-200'}`}>
+        <div className="flex items-center gap-3">
+          <BookOpen className="text-indigo-500" size={28} />
+          <h1 className="font-black tracking-tight text-lg">DictateMaster</h1>
+        </div>
+        <div className="flex items-center gap-2 md:gap-4 flex-wrap">
+          <div className="flex bg-slate-800/50 rounded-lg p-1">
+            {(['base', 'lg', 'xl'] as FontSize[]).map(s => (
+              <button key={s} onClick={() => setFontSize(s)} className={`p-1.5 rounded transition-all ${fontSize === s ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                <TypeIcon size={18} className={s === 'xl' ? 'scale-125' : s === 'lg' ? 'scale-110' : ''} />
               </button>
             ))}
           </div>
+
+          <div className="flex items-center gap-2 bg-slate-800/50 rounded-lg px-3 py-1.5 border border-slate-700">
+            <Mic2 size={16} className="text-indigo-400" />
+            <select value={selectedVoiceURI} onChange={(e) => setSelectedVoiceURI(e.target.value)} className="bg-transparent text-[10px] font-black uppercase cursor-pointer focus:outline-none max-w-[100px] md:max-w-[150px]">
+              <option value="" className="bg-slate-900">Default</option>
+              {filteredVoices.map(v => <option key={v.voiceURI} value={v.voiceURI} className="bg-slate-900">{v.name}</option>)}
+            </select>
+          </div>
+
+          <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="p-2 rounded-full hover:bg-slate-800 transition-colors">
+            {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
+          </button>
+          <select value={language} onChange={(e) => setLanguage(e.target.value as Language)} className="bg-transparent font-bold text-xs uppercase cursor-pointer border border-slate-700 rounded px-2 py-1">
+            {['en', 'he', 'ar', 'fr', 'es', 'zh', 'hi', 'de'].map(l => <option key={l} value={l} className="bg-slate-900">{l}</option>)}
+          </select>
         </div>
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-12">
         {step === 'setup' && (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4">
-            <div className="bg-white rounded-3xl shadow-2xl shadow-slate-200/50 p-8 md:p-12 border border-slate-100">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
-                <div className="flex items-center gap-4">
-                  <div className="p-3 bg-indigo-50 text-indigo-600 rounded-2xl">
-                    <Settings size={32} />
-                  </div>
-                  <div>
-                    <h2 className="text-2xl font-black text-slate-800">{UI_STRINGS.setupTitle[language]}</h2>
-                    <p className="text-slate-500 font-medium">{UI_STRINGS.setupDesc[language]}</p>
-                  </div>
+            {autosave && (
+              <div className={`p-4 rounded-2xl border-2 flex items-center justify-between gap-4 animate-bounce-subtle ${theme === 'dark' ? 'bg-indigo-500/10 border-indigo-500/20' : 'bg-indigo-50 border-indigo-100'}`}>
+                <div className="flex items-center gap-3">
+                   <Target className="text-indigo-500" />
+                   <p className="text-sm font-bold">Incomplete session found. Resume?</p>
                 </div>
-
-                {/* Import/Export Actions */}
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => fileInputRef.current?.click()}
-                    className="p-3 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-2xl transition-all active:scale-95 flex items-center gap-2 text-xs font-bold"
-                    title={UI_STRINGS.import[language]}
-                  >
-                    <Upload size={18} />
-                    <span className="hidden sm:inline">{UI_STRINGS.import[language]}</span>
-                  </button>
-                  <input ref={fileInputRef} type="file" accept=".txt" onChange={handleImport} className="hidden" />
-                  <button 
-                    onClick={handleExport}
-                    className="p-3 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-2xl transition-all active:scale-95 flex items-center gap-2 text-xs font-bold"
-                    title={UI_STRINGS.export[language]}
-                  >
-                    <Download size={18} />
-                    <span className="hidden sm:inline">{UI_STRINGS.export[language]}</span>
-                  </button>
-                  <button 
-                    onClick={handleSaveList}
-                    className="p-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-2xl transition-all active:scale-95 flex items-center gap-2 text-xs font-bold"
-                    title={UI_STRINGS.saveCurrent[language]}
-                  >
-                    <Plus size={18} />
-                    <span className="hidden sm:inline">{UI_STRINGS.saveCurrent[language]}</span>
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-6">
-                <div className="relative group">
-                  <label className="block text-sm font-bold mb-3 text-slate-600 flex items-center gap-2">
-                    <Info size={16} className="text-indigo-400" />
-                    {UI_STRINGS.wordListLabel[language]}
-                  </label>
-                  <textarea
-                    value={wordListRaw}
-                    onChange={(e) => setWordListRaw(e.target.value)}
-                    placeholder={language === 'he' ? 'apple:תפוח\nbanana:בננה' : 'apple:meaning\nbanana:meaning'}
-                    className="w-full h-64 px-6 py-5 rounded-3xl border-2 border-slate-100 focus:border-indigo-400 focus:ring-0 transition-all resize-none text-xl shadow-sm group-hover:border-slate-200 font-medium"
-                  />
-                  <div className="absolute top-4 right-4 flex flex-col gap-2">
-                    <button 
-                      onClick={() => setWordListRaw('')} 
-                      className="p-3 text-slate-300 hover:text-red-400 transition-colors bg-white rounded-full shadow-md hover:shadow-lg active:scale-95" 
-                      title="Clear All"
-                    >
-                      <Trash2 size={20} />
-                    </button>
-                    <button 
-                      onClick={autoFillMeanings}
-                      disabled={isAutoFilling || !wordListRaw.trim()}
-                      className="p-3 text-indigo-500 hover:text-indigo-600 transition-colors bg-white rounded-full shadow-md hover:shadow-lg disabled:opacity-50 active:scale-95 group/sparkle" 
-                      title={UI_STRINGS.autoFillBtn[language]}
-                    >
-                      {isAutoFilling ? <Loader2 size={20} className="animate-spin" /> : <Sparkles size={20} className="group-hover/sparkle:animate-pulse" />}
-                    </button>
-                    <button 
-                      onClick={handleCopy}
-                      disabled={!wordListRaw.trim()}
-                      className={`p-3 transition-colors bg-white rounded-full shadow-md hover:shadow-lg active:scale-95 ${copyFeedback ? 'text-green-500' : 'text-slate-400 hover:text-indigo-500'}`}
-                      title={UI_STRINGS.copy[language]}
-                    >
-                      {copyFeedback ? <CheckCircle2 size={20} /> : <Copy size={20} />}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100/50 flex items-center gap-3">
-                    <ChevronRight size={18} className={`text-indigo-400 ${isRTL ? 'rotate-180' : ''}`} />
-                    <span className="text-sm font-bold text-indigo-700">apple:תפוח</span>
-                  </div>
-                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 flex items-center gap-3">
-                    <ChevronRight size={18} className={`text-slate-400 ${isRTL ? 'rotate-180' : ''}`} />
-                    <span className="text-sm font-bold text-slate-600">banana:בננה</span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-4 pt-4">
-                  <button
-                    onClick={startPractice}
-                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-black py-6 rounded-[2rem] shadow-2xl shadow-indigo-100 transition-all flex items-center justify-center gap-3 active:scale-[0.98] text-xl"
-                  >
-                    <span>{UI_STRINGS.startBtn[language]}</span>
-                    <ArrowRight size={24} className={isRTL ? 'rotate-180' : ''} />
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Draggable Reorder Section */}
-            {wordLines.length > 1 && (
-              <div className="bg-white rounded-3xl shadow-xl p-8 border border-slate-100">
-                <div className="flex items-center gap-2 mb-6">
-                  <GripVertical size={24} className="text-indigo-500" />
-                  <h3 className="text-lg font-black text-slate-800">{UI_STRINGS.reorderTitle[language]}</h3>
-                </div>
-                <div className="flex flex-wrap gap-3">
-                  {wordLines.map((line, idx) => (
-                    <div
-                      key={`${line}-${idx}`}
-                      draggable
-                      onDragStart={() => handleDragStart(idx)}
-                      onDragOver={(e) => handleDragOver(e, idx)}
-                      onDragEnd={handleDragEnd}
-                      className={`px-6 py-3 bg-slate-50 border border-slate-100 rounded-2xl cursor-grab active:cursor-grabbing transition-all hover:border-indigo-200 hover:bg-indigo-50/50 font-bold text-slate-600 flex items-center gap-3 shadow-sm ${draggedIndex === idx ? 'opacity-40 scale-95 border-indigo-400' : 'opacity-100 scale-100'}`}
-                    >
-                      <GripVertical size={14} className="text-slate-300" />
-                      <span>{line}</span>
-                    </div>
-                  ))}
-                </div>
+                <button onClick={resumePractice} className="bg-indigo-600 text-white px-6 py-2 rounded-xl text-xs font-black shadow-lg hover:bg-indigo-700 transition-all">Resume Session</button>
               </div>
             )}
 
-            {/* Library Section */}
-            {library.length > 0 && (
-              <div className="bg-white rounded-3xl shadow-xl p-8 border border-slate-100">
-                <div className="flex items-center gap-2 mb-6">
-                  <FolderOpen size={24} className="text-indigo-500" />
-                  <h3 className="text-lg font-black text-slate-800">{UI_STRINGS.savedLists[language]}</h3>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                  {library.map((item) => (
-                    <div 
-                      key={item.id}
-                      onClick={() => handleLoadList(item)}
-                      className="p-4 bg-slate-50 hover:bg-indigo-50 border border-slate-100 hover:border-indigo-200 rounded-2xl cursor-pointer transition-all group relative"
-                    >
-                      <p className="font-bold text-slate-700 truncate mb-1">{item.name}</p>
-                      <p className="text-[10px] text-slate-400 font-bold uppercase">{new Date(item.timestamp).toLocaleDateString()}</p>
-                      <button 
-                        onClick={(e) => handleDeleteList(e, item.id)}
-                        className="absolute top-2 right-2 p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        <Trash2 size={14} />
+            <div className={`rounded-3xl shadow-2xl overflow-hidden border ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-100'}`}>
+              <div className="flex border-b border-slate-800">
+                {(['new', 'library', 'history'] as SetupTab[]).map(t => (
+                  <button key={t} onClick={() => setActiveTab(t)} className={`flex-1 py-4 font-black uppercase text-xs tracking-widest transition-all ${activeTab === t ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-800'}`}>
+                    {UI_STRINGS[t]?.[language] || t}
+                  </button>
+                ))}
+              </div>
+
+              <div className="p-8">
+                {activeTab === 'new' && (
+                  <div className="space-y-6">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <h2 className="text-2xl font-black mb-1">{UI_STRINGS.setupTitle[language]}</h2>
+                        <p className="text-slate-500 font-medium text-sm">{UI_STRINGS.setupDesc[language]}</p>
+                      </div>
+                      <button onClick={() => setIsSaveModalOpen(true)} className="flex items-center gap-2 px-4 py-2 bg-indigo-500/10 text-indigo-500 hover:bg-indigo-500 hover:text-white transition-all rounded-xl font-black text-sm">
+                        <Save size={18} /> {UI_STRINGS.saveList[language]}
                       </button>
                     </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {step === 'practice' && (
-          <div className="space-y-8 animate-in fade-in slide-in-from-top-4 duration-500">
-            <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
-              <div className="flex-1 w-full space-y-2">
-                <div className="flex justify-between items-end text-sm font-bold">
-                  <span className="text-slate-400 uppercase tracking-widest">{UI_STRINGS.progress[language]}</span>
-                  <span className="text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full font-black">{Math.round(progress)}%</span>
-                </div>
-                <div className="h-4 w-full bg-slate-200 rounded-full overflow-hidden border border-white shadow-inner">
-                  <div className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-700 ease-out" style={{ width: `${progress}%` }} />
-                </div>
-              </div>
-              <div className="flex items-center gap-3 bg-white px-6 py-4 rounded-3xl shadow-sm border border-slate-100 min-w-[140px] justify-center">
-                 <Timer size={22} className="text-indigo-500 animate-pulse" />
-                 <span className="font-mono text-2xl font-black text-slate-700">
-                   {String(Math.floor(elapsedTime / 60)).padStart(2, '0')}:{String(elapsedTime % 60).padStart(2, '0')}
-                 </span>
-              </div>
-            </div>
-
-            <div className={`bg-white rounded-[3rem] shadow-2xl p-8 md:p-20 text-center border-4 transition-all duration-500 relative overflow-hidden ${
-              showFeedback === true ? 'border-green-200 bg-green-50/10' : 
-              showFeedback === false ? 'border-red-200 bg-red-50/10' : 
-              'border-white'
-            }`}>
-              {words[currentIndex].meaning && (
-                <div className="mb-10 inline-block px-10 py-5 bg-indigo-50 text-indigo-700 rounded-[2rem] border border-indigo-100 font-black text-3xl shadow-sm animate-in zoom-in-90">
-                   <p className="text-xs uppercase text-indigo-400 mb-2 font-black tracking-widest">{UI_STRINGS.meaning[language]}</p>
-                   {words[currentIndex].meaning}
-                </div>
-              )}
-
-              <div className="mb-12">
-                <button
-                  onClick={() => playWord(words[currentIndex].word)}
-                  disabled={isAudioLoading}
-                  className={`mx-auto w-36 h-36 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-110 active:scale-90 shadow-2xl disabled:opacity-50 ${
-                    isAudioLoading ? 'bg-slate-100 text-slate-400' : 'bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-indigo-200'
-                  }`}
-                >
-                  {isAudioLoading ? <Loader2 size={64} className="animate-spin" /> : <Volume2 size={64} />}
-                </button>
-                <p className="mt-8 text-slate-400 font-black uppercase tracking-widest text-xs">{UI_STRINGS.listenAndSpell[language]}</p>
-              </div>
-
-              <div className="max-w-md mx-auto relative group">
-                <div className="relative">
-                  {/* Visual Display Layer for Spell Checking */}
-                  {showFeedback === null && (
-                    <div className="absolute inset-0 flex items-center justify-center py-8">
-                      {renderRealTimeSpellCheck(userInput, words[currentIndex].word)}
+                    <div className="grid grid-cols-2 gap-4">
+                      <button onClick={() => setPracticeMode('classic')} className={`flex items-center justify-center gap-3 p-4 rounded-2xl border-2 transition-all font-black ${practiceMode === 'classic' ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800/50 border-slate-700 text-slate-500 hover:text-slate-300'}`}>
+                        <LayoutList size={20} /> {UI_STRINGS.classicMode[language]}
+                      </button>
+                      <button onClick={() => setPracticeMode('timed')} className={`flex items-center justify-center gap-3 p-4 rounded-2xl border-2 transition-all font-black ${practiceMode === 'timed' ? 'bg-amber-600 border-amber-600 text-white shadow-lg shadow-amber-600/20' : 'bg-slate-800/50 border-slate-700 text-slate-500 hover:text-slate-300'}`}>
+                        <Zap size={20} /> {UI_STRINGS.timedMode[language]}
+                      </button>
                     </div>
-                  )}
-
-                  <input
-                    ref={inputRef}
-                    autoFocus
-                    autoComplete="off"
-                    autoCorrect="off"
-                    autoCapitalize="off"
-                    spellCheck="false"
-                    type="text"
-                    value={userInput}
-                    onChange={(e) => {
-                      setUserInput(e.target.value);
-                      if (showFeedback !== null) setShowFeedback(null);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && userInput.trim()) {
-                        showFeedback === null ? checkWord() : nextStep();
-                      }
-                    }}
-                    placeholder={UI_STRINGS.typeHere[language]}
-                    className={`w-full text-center text-5xl font-black py-8 bg-transparent border-b-8 focus:outline-none transition-all placeholder:text-slate-100 selection:bg-indigo-100 ${
-                      showFeedback === true ? 'border-green-500 text-green-600' : 
-                      showFeedback === false ? 'border-red-500 text-red-600' : 
-                      'border-slate-100 focus:border-indigo-400 text-transparent caret-indigo-600'
-                    }`}
-                  />
-                </div>
-
-                <div className="mt-12 flex justify-center gap-6">
-                  {showFeedback === null ? (
-                    <button
-                      onClick={checkWord}
-                      disabled={!userInput.trim()}
-                      className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white px-16 py-5 rounded-[2rem] font-black text-xl transition-all shadow-xl active:scale-95 shadow-indigo-100"
-                    >
-                      {UI_STRINGS.submit[language]}
+                    <textarea value={wordListRaw} onChange={(e) => setWordListRaw(e.target.value)} className={`w-full h-80 px-6 py-5 rounded-2xl border-2 focus:ring-0 transition-all resize-none font-bold shadow-sm ${fontSizeClass} ${theme === 'dark' ? 'bg-slate-800 border-slate-700 focus:border-indigo-500' : 'bg-slate-50 border-slate-200 focus:border-indigo-400'}`} placeholder="v1:v2:v3:meaning or word:meaning" />
+                    <button onClick={() => startPractice()} className={`w-full font-black py-6 rounded-2xl shadow-xl flex items-center justify-center gap-3 active:scale-[0.98] text-xl transition-all ${practiceMode === 'classic' ? 'bg-indigo-600 hover:bg-indigo-700 text-white' : 'bg-amber-600 hover:bg-amber-700 text-white'}`}>
+                      {UI_STRINGS.startBtn[language]} <ArrowRight size={24} className={isRTL ? 'rotate-180' : ''} />
                     </button>
-                  ) : (
-                    <button
-                      onClick={() => nextStep()}
-                      className="bg-slate-900 hover:bg-slate-800 text-white px-16 py-5 rounded-[2rem] font-black text-xl transition-all shadow-xl flex items-center gap-3 active:scale-95"
-                    >
-                      <span>{UI_STRINGS.next[language]}</span>
-                      <ArrowRight size={28} className={isRTL ? 'rotate-180' : ''} />
-                    </button>
-                  )}
-                </div>
+                  </div>
+                )}
 
-                {showFeedback === false && (
-                  <div className="mt-12 p-8 bg-white text-slate-800 rounded-[2.5rem] animate-in zoom-in-95 border border-red-100 shadow-lg shadow-red-100/50">
-                    <div className="mb-6">
-                      <p className="font-black text-xs mb-3 uppercase tracking-wider text-red-400">{UI_STRINGS.typed[language]}:</p>
-                      {renderFeedbackDiff(words[currentIndex].word, userInput)}
+                {activeTab === 'library' && (
+                  <div className="space-y-4">
+                    <div className="relative">
+                      <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                      <input type="text" placeholder="Search library..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className={`w-full pl-10 pr-4 py-3 rounded-xl border text-sm focus:outline-none ${theme === 'dark' ? 'bg-slate-800 border-slate-700 focus:border-indigo-500' : 'bg-white border-slate-200 focus:border-indigo-400'}`} />
                     </div>
-                    <div className="pt-6 border-t border-slate-50">
-                      <p className="font-black text-xs mb-3 uppercase tracking-wider text-green-500">{UI_STRINGS.incorrect[language].split(':')[0]}:</p>
-                      <p className="text-5xl font-black tracking-widest text-slate-800 select-none uppercase">{words[currentIndex].word}</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[500px] overflow-y-auto no-scrollbar pb-10">
+                      {filteredLibrary.map(item => (
+                        <div key={item.id} onClick={() => {setWordListRaw(item.content); setActiveTab('new');}} className={`p-5 rounded-2xl border-2 cursor-pointer transition-all hover:scale-[1.02] group relative ${theme === 'dark' ? 'bg-slate-900 border-slate-800 hover:border-indigo-500' : 'bg-white border-slate-100 hover:border-indigo-400'}`}>
+                          <div className="flex justify-between items-start mb-2">
+                            <h4 className="font-black text-lg group-hover:text-indigo-500 line-clamp-1">{item.name}</h4>
+                            <button onClick={(e) => { e.stopPropagation(); setLibrary(l => l.filter(i => i.id !== item.id)); }} className="p-1 opacity-0 group-hover:opacity-100 bg-red-500/10 text-red-500 rounded-lg hover:bg-red-500 hover:text-white transition-all"><Trash2 size={16}/></button>
+                          </div>
+                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest flex items-center gap-1"><Clock size={12}/> {new Date(item.timestamp).toLocaleDateString()}</p>
+                        </div>
+                      ))}
                     </div>
+                  </div>
+                )}
+
+                {activeTab === 'history' && (
+                  <div className="space-y-4 max-h-[600px] overflow-y-auto no-scrollbar pb-10">
+                    {history.length === 0 ? <p className="text-center py-10 text-slate-500 italic">No past sessions yet.</p> : history.map(h => (
+                      <div key={h.id} className={`p-6 rounded-3xl border-2 transition-all hover:border-indigo-500/30 ${theme === 'dark' ? 'bg-slate-800/50 border-slate-700' : 'bg-white border-slate-100'}`}>
+                        <div className="flex justify-between items-start mb-4">
+                          <div className="flex gap-4 items-center">
+                            <div className={`p-3 rounded-2xl ${h.mode === 'timed' ? 'bg-amber-500/10 text-amber-500' : 'bg-indigo-500/10 text-indigo-500'}`}>
+                              {h.mode === 'timed' ? <Zap size={20}/> : <LayoutList size={20}/>}
+                            </div>
+                            <div>
+                              <p className="text-[10px] uppercase font-black tracking-widest text-slate-500">{new Date(h.timestamp).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</p>
+                              <p className="text-2xl font-black">{h.score} / {h.total}</p>
+                            </div>
+                          </div>
+                          <div className="flex gap-2">
+                            {h.missedWords.length > 0 && (
+                              <button onClick={() => startPractice(h.missedWords.map(m => ({ word: m.word, meaning: m.meaning, userValue: '', isCorrect: null, timeTaken: 0 })))} className="bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white px-4 py-2 rounded-xl text-xs font-black transition-all">Retry Missed</button>
+                            )}
+                            <button onClick={() => { setWordListRaw(h.fullListRaw); setPracticeMode(h.mode); startPractice(); }} className="bg-indigo-600/10 text-indigo-500 hover:bg-indigo-600 hover:text-white px-4 py-2 rounded-xl text-xs font-black transition-all">Repeat All</button>
+                          </div>
+                        </div>
+                        {h.missedWords.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mt-2 pt-3 border-t border-slate-800/20">
+                            {h.missedWords.slice(0, 12).map((m, idx) => (
+                              <button key={idx} onClick={() => handleNativeTTS(m.word)} className="px-3 py-1 rounded-full bg-slate-900/50 border border-slate-700 text-[10px] font-bold text-slate-300 hover:bg-indigo-600 hover:text-white flex items-center gap-1 transition-all"><Volume1 size={10}/> {m.word}</button>
+                            ))}
+                            {h.missedWords.length > 12 && <span className="text-[10px] text-slate-500 font-bold">+{h.missedWords.length - 12} more</span>}
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
             </div>
+          </div>
+        )}
 
-            <button 
-              onClick={reset}
-              className="flex items-center gap-2 text-slate-400 hover:text-slate-600 mx-auto transition-colors font-black text-sm pt-4"
-            >
-              <RotateCcw size={18} />
-              <span>{UI_STRINGS.cancel[language]}</span>
-            </button>
+        {isSaveModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-950/80 backdrop-blur-sm animate-in fade-in">
+            <div className={`w-full max-w-md p-8 rounded-[2.5rem] shadow-2xl ${theme === 'dark' ? 'bg-slate-900 border border-slate-800' : 'bg-white border border-slate-200'}`}>
+              <h3 className="text-2xl font-black mb-6 flex items-center gap-3">
+                <Save className="text-indigo-500" />
+                {UI_STRINGS.saveList[language]}
+              </h3>
+              <input autoFocus type="text" placeholder="Name your list (e.g., Unit 1 Words)" value={newListName} onChange={(e) => setNewListName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && (setLibrary([{id: crypto.randomUUID(), name: newListName, content: wordListRaw, timestamp: Date.now()}, ...library]), setIsSaveModalOpen(false), setNewListName(''))} className={`w-full px-6 py-4 rounded-2xl border-2 mb-8 focus:outline-none transition-all font-bold ${theme === 'dark' ? 'bg-slate-800 border-slate-700 focus:border-indigo-500' : 'bg-slate-50 border-slate-200 focus:border-indigo-400'}`} />
+              <div className="flex gap-4">
+                <button onClick={() => setIsSaveModalOpen(false)} className="flex-1 py-4 rounded-2xl font-black text-slate-500 hover:bg-slate-800 transition-all">Cancel</button>
+                <button onClick={() => (setLibrary([{id: crypto.randomUUID(), name: newListName, content: wordListRaw, timestamp: Date.now()}, ...library]), setIsSaveModalOpen(false), setNewListName(''))} className="flex-1 py-4 rounded-2xl bg-indigo-600 text-white font-black hover:bg-indigo-700 transition-all shadow-lg">Save</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {step === 'practice' && (
+          <div className="space-y-8 animate-in fade-in slide-in-from-top-4">
+            <div className="flex justify-between items-center">
+              <button onClick={() => setStep('setup')} className="flex items-center gap-2 font-black text-slate-500 hover:text-indigo-500 transition-colors"><RotateCcw size={18}/> Reset</button>
+              <div className="flex items-center gap-6">
+                {/* Pause toggle for both modes, but especially important for Timed Challenge */}
+                <button onClick={() => setIsPaused(!isPaused)} className="p-2 rounded-xl bg-slate-800 text-slate-400 hover:text-white transition-all">
+                  {isPaused ? <PlayCircle size={24} /> : <Pause size={24} />}
+                </button>
+                {practiceMode === 'classic' ? (
+                  <><div className="text-slate-500 font-bold uppercase tracking-widest text-xs">Word {currentIndex + 1} / {words.length}</div><div className="font-mono text-2xl font-black">{String(Math.floor(elapsedTime / 60)).padStart(2, '0')}:{String(elapsedTime % 60).padStart(2, '0')}</div></>
+                ) : (
+                  <><div className="flex flex-col items-end"><span className="text-[10px] uppercase font-black text-amber-500 tracking-widest">Score</span><span className="text-2xl font-black text-amber-500">{timedScore}</span></div><div className="flex flex-col items-center"><span className="text-[10px] uppercase font-black text-slate-500 tracking-widest">Time Left</span><div className={`font-mono text-3xl font-black ${timeLeft < 10 ? 'text-red-500 animate-pulse' : ''}`}>{timeLeft}s</div></div></>
+                )}
+              </div>
+            </div>
+
+            {isPaused ? (
+              <div className="rounded-[3rem] shadow-2xl p-20 text-center border-4 border-indigo-500/20 bg-slate-900/50 backdrop-blur-xl animate-in zoom-in-95">
+                <Pause size={80} className="mx-auto text-indigo-500 mb-8 opacity-50" />
+                <h2 className="text-4xl font-black mb-12">Session Paused</h2>
+                <button onClick={() => setIsPaused(false)} className="bg-indigo-600 hover:bg-indigo-700 text-white font-black px-12 py-5 rounded-3xl text-xl flex items-center justify-center gap-3 mx-auto transition-all active:scale-95 shadow-lg shadow-indigo-600/30">
+                   <PlayCircle /> Resume Practice
+                </button>
+              </div>
+            ) : (
+              <div 
+                onTouchStart={(e) => touchStartRef.current = e.targetTouches[0].clientX} 
+                onTouchEnd={(e) => { 
+                  if (touchStartRef.current && Math.abs(touchStartRef.current - e.changedTouches[0].clientX) > 60) {
+                    handleNativeTTS(words[currentIndex].meaning || '');
+                  } 
+                }} 
+                className={`rounded-[3rem] shadow-2xl p-12 text-center border-4 transition-all relative group ${theme === 'dark' ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-100'} ${showFeedback === true ? 'border-green-500/50' : showFeedback === false ? 'border-red-500/50' : 'border-transparent'}`}
+              >
+                {words[currentIndex].meaning && (
+                  <div className="mb-8 inline-flex items-center gap-3 px-8 py-4 bg-indigo-500/10 text-indigo-400 rounded-2xl font-black text-2xl relative">
+                    <span>{words[currentIndex].meaning}</span>
+                    <button onClick={() => handleNativeTTS(words[currentIndex].meaning || '')} className="p-1.5 rounded-lg hover:bg-indigo-500/20 text-indigo-400/70 hover:text-indigo-400 transition-all active:scale-90"><Volume1 size={20} /></button>
+                    <p className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-[9px] font-bold text-slate-600 uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">Swipe side-to-side to hear meaning again</p>
+                  </div>
+                )}
+                <div className="flex flex-col items-center gap-4 mb-12">
+                  <button onClick={() => playGeminiTTS(words[currentIndex].word)} className="w-24 h-24 rounded-full bg-indigo-600 text-white flex items-center justify-center hover:scale-110 transition-transform shadow-lg shadow-indigo-500/20">
+                    {isAudioLoading ? <Loader2 className="animate-spin" /> : <Volume2 size={40} />}
+                  </button>
+                  <button onClick={() => handleNativeTTS(words[currentIndex].word)} className="text-xs font-black uppercase tracking-widest text-slate-500 hover:text-indigo-400">Listen (Offline)</button>
+                </div>
+                <input 
+                  ref={inputRef} 
+                  autoFocus 
+                  type="text" 
+                  value={userInput} 
+                  onChange={(e) => setUserInput(e.target.value)} 
+                  onKeyDown={(e) => e.key === 'Enter' && checkWord()} 
+                  className={`w-full text-center text-4xl md:text-5xl font-black py-6 bg-transparent border-b-8 focus:outline-none transition-all ${theme === 'dark' ? 'border-slate-800 focus:border-indigo-500' : 'border-slate-100 focus:border-indigo-400'} ${showFeedback === true ? 'text-green-500' : showFeedback === false ? 'text-red-500' : ''}`} 
+                  placeholder={UI_STRINGS.typeHere[language]} 
+                />
+                <div className="mt-12 flex flex-wrap justify-center gap-4 w-full max-w-lg mx-auto">
+                  <button onClick={checkWord} className={`flex-[2] px-12 py-5 rounded-3xl font-black text-xl transition-all shadow-xl flex items-center justify-center gap-3 active:scale-95 ${showFeedback === null ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-800 text-white hover:bg-slate-700'}`}>
+                      {showFeedback === null ? <span>{UI_STRINGS.submit[language]}</span> : <><span className="flex items-center gap-2">{UI_STRINGS.next[language]}<ArrowRight size={24} className={isRTL ? 'rotate-180' : ''} /></span></>}
+                  </button>
+                  <button onClick={skipWord} className="flex-1 flex items-center justify-center gap-2 px-6 py-4 bg-slate-800/50 text-slate-500 hover:bg-slate-800 hover:text-slate-300 font-black rounded-2xl transition-all active:scale-95">
+                      <SkipForward size={20} />
+                      <span>{UI_STRINGS.skip[language]}</span>
+                  </button>
+                </div>
+                {showFeedback === false && (
+                  <div className="mt-8 p-6 bg-red-500/10 rounded-2xl border border-red-500/20 animate-in zoom-in-95">
+                    <p className="text-red-400 text-[10px] font-black uppercase tracking-widest mb-1">Correct Answer</p>
+                    <p className="text-red-500 font-black text-3xl uppercase tracking-widest">{words[currentIndex].word}</p>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
         {step === 'summary' && (
-          <div className="bg-white rounded-[4rem] shadow-2xl p-8 md:p-20 animate-in zoom-in-95 duration-700 border border-slate-100">
-            <div className="text-center mb-16 relative">
-              <div className="inline-flex items-center justify-center p-10 bg-gradient-to-br from-yellow-300 to-orange-400 text-white rounded-[2.5rem] mb-10 shadow-2xl shadow-yellow-100 animate-bounce">
-                <Trophy size={100} />
-              </div>
-              <h2 className="text-6xl font-black mb-6 tracking-tighter text-slate-800">{UI_STRINGS.finalScore[language]}</h2>
-              <div className="text-[10rem] leading-none font-black text-indigo-600 drop-shadow-xl mb-6">{scoreInfo.finalScore}</div>
+          <div className={`rounded-[4rem] p-16 text-center shadow-2xl animate-in zoom-in-95 ${theme === 'dark' ? 'bg-slate-900' : 'bg-white'}`}>
+            <Trophy size={100} className="mx-auto text-yellow-500 mb-8" />
+            <h2 className="text-5xl font-black mb-12">{practiceMode === 'timed' ? "Time's Up!" : "Well Done!"}</h2>
+            <div className="flex flex-wrap justify-center gap-12 mb-12">
+               <div><p className="text-xs uppercase font-black text-slate-500 mb-2">Score</p><p className="text-5xl font-black">{practiceMode === 'classic' ? words.filter(w => w.isCorrect).length : timedScore}</p></div>
+               <div><p className="text-xs uppercase font-black text-slate-500 mb-2">Total Words</p><p className="text-5xl font-black">{words.length}</p></div>
+               <div><p className="text-xs uppercase font-black text-slate-500 mb-2">Accuracy</p><p className="text-5xl font-black">{Math.round((words.filter(w => w.isCorrect).length / (currentIndex || 1)) * 100)}%</p></div>
             </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-16">
-               <div className="p-8 bg-slate-50 rounded-[2rem] border border-slate-100 flex flex-col items-center gap-2 shadow-sm">
-                  <CheckCircle2 size={32} className="text-green-500" />
-                  <span className="text-xs font-black text-slate-400 uppercase tracking-widest">{UI_STRINGS.accuracy[language]}</span>
-                  <span className="text-3xl font-black text-slate-700">+{scoreInfo.accuracyPoints}</span>
-               </div>
-               <div className="p-8 bg-indigo-50 rounded-[2rem] border border-indigo-100 flex flex-col items-center gap-2 shadow-sm">
-                  <Zap size={32} className="text-indigo-500" />
-                  <span className="text-xs font-black text-indigo-400 uppercase tracking-widest">{UI_STRINGS.speedBonus[language]}</span>
-                  <span className="text-3xl font-black text-indigo-700">+{scoreInfo.speedBonus}</span>
-               </div>
-               <div className="p-8 bg-red-50 rounded-[2rem] border border-red-100 flex flex-col items-center gap-2 shadow-sm">
-                  <TrendingDown size={32} className="text-red-500" />
-                  <span className="text-xs font-black text-red-400 uppercase tracking-widest">{UI_STRINGS.timePenalties[language]}</span>
-                  <span className="text-3xl font-black text-red-700">-{scoreInfo.timePenalty}</span>
-               </div>
-            </div>
-
-            <div className="flex flex-col md:flex-row gap-6">
-              <button
-                onClick={startPractice}
-                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-black py-7 rounded-[2.5rem] flex items-center justify-center gap-3 transition-all active:scale-[0.98] shadow-2xl shadow-indigo-100 text-2xl"
-              >
-                <RotateCcw size={32} />
-                <span>{UI_STRINGS.tryAgain[language]}</span>
-              </button>
-              <button
-                onClick={reset}
-                className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-black py-7 rounded-[2.5rem] flex items-center justify-center gap-3 transition-all active:scale-[0.98] text-2xl"
-              >
-                <Settings size={32} />
-                <span>{UI_STRINGS.modifyList[language]}</span>
-              </button>
-            </div>
+            <button onClick={() => setStep('setup')} className="bg-indigo-600 hover:bg-indigo-700 text-white font-black px-12 py-5 rounded-3xl text-xl flex items-center justify-center gap-3 mx-auto transition-all active:scale-95 shadow-lg shadow-indigo-600/30">
+              <RotateCcw /> {UI_STRINGS.tryAgain[language]}
+            </button>
           </div>
         )}
       </main>
 
-      <footer className="max-w-4xl mx-auto px-6 pb-12">
-         <div className="bg-white/50 border border-slate-200 rounded-[2.5rem] p-8 flex flex-col md:flex-row items-center justify-between gap-4 text-slate-400 font-black text-[10px] uppercase tracking-[0.2em]">
-           <p>© {new Date().getFullYear()} DictateMaster AI • Senior Edition</p>
-           <div className="flex gap-8">
-             <span>v2.8.5 Optimized Audio</span>
-             <span>Offline Persistence</span>
-           </div>
-         </div>
+      <footer className="max-w-4xl mx-auto px-6 py-12 border-t border-slate-800/50 mt-12 flex flex-col md:flex-row items-center justify-between gap-6">
+        <div className="text-center md:text-left">
+          <p className="font-black text-xs uppercase tracking-widest text-slate-500 mb-1">(C) Noam Gold AI 2025</p>
+          <p className="text-[10px] text-slate-600 font-bold uppercase">Empowering Vocabulary Learning</p>
+        </div>
+        <div className="flex items-center gap-6">
+          <a href="mailto:goldnoamai@gmail.com" className="flex items-center gap-2 text-xs font-black text-slate-400 hover:text-indigo-400 transition-colors uppercase tracking-widest">
+            <Mail size={14} /> Send Feedback
+          </a>
+          <div className="h-4 w-px bg-slate-800" />
+          <span className="text-xs font-black text-slate-600 uppercase tracking-widest">v5.1 Pro Dashboard</span>
+        </div>
       </footer>
     </div>
   );
